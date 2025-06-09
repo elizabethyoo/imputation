@@ -1,0 +1,22 @@
+# lab source code 
+beiwe/
+forest/
+dp-bp-fda-cp/
+code/old_code/
+
+
+# data and other intermediate files
+processed_data/
+raw_beiwe_data/
+results/
+
+# Python artifacts
+__pycache__/
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+# any python environment files
+.python-version
+
+# IntelliJ, VsCode project files
+.idea/
+.vscode/
