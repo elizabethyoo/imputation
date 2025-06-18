@@ -1,0 +1,269 @@
+
+---
+title: "Fréchet Random Forest Simulation Study"
+format: html
+editor: visual
+jupyter: julia-1.9
+execute:
+  freeze: auto
+  echo: true
+---
+
+
+This notebook replicates some of the results in the capitaine2024frechet paper, corresponding to sections 5 and 6, where the authors simulate functional data and apply the Fréchet Random Forest (FRF) method to predict output curves based on input curves.
+
+We start with the two temporal behavior functions scheme 
+
+## 
+### SET UP: load libraries, define grid, set seed
+
+```{r}
+library(reshape)
+library(ggplot2)
+library(here)
+
+here::i_am("sandbox/frechet_rf_sims.qmd")
+
+# for HDF5 I/O
+if (!requireNamespace("hdf5r", quietly = TRUE)) {
+    install.packages("hdf5r")
+}
+library(hdf5r)
+
+set.seed(123)
+
+# time grid on [0,1] with step 0.05
+t_seq <- seq(0, 1, by = 0.05)
+nt <- length(t_seq)
+
+# sample sizes to simulate
+sample_sizes <- c(100, 200, 400, 1000)
+```
+
+### Define f_{j,k}(t) and g_{j,k}(t)
+```{r}
+
+# f_list[[j]][[k]] gives f_{j,k}(t)
+f1 <- list(
+    function(t) 0.5 * t + 0.1 * sin(6 * t),
+    function(t) 0.3 - 0.7 * (t - 0.45)^2
+)
+f2 <- list(
+    function(t) 2 * (t - 0.5)^2 - 0.3 * t,
+    function(t) 0.2 - 0.3 * t + 0.1 * cos(8 * t)
+)
+f_list <- list(
+    # j = 1
+    f1,
+    # j = 2
+    f2,
+    # j = 3 copies j=1
+    f1,
+    # j = 4 copies j=2
+    f2,
+    # j = 5
+    list(
+        function(t) 0.5 * t^2 - 0.15 * sin(5 * t),
+        function(t) 0.5 * t^2
+    ),
+    # j = 6
+    list(
+        function(t) 0.6 * log(t + 1) - 0.3 * sin(5 * t),
+        function(t) 0.6 * log(t + 1) + 0.3 * sin(5 * t)
+    )
+)
+
+# g_list[[j]][[k]] gives g_{j,k}(t) for j,k in {1,2}
+g_list <- list(
+    list(
+        function(t) t + 0.3 * sin(10 * (t + 1)), # g_{1,1}
+        function(t) t + 2 * (t - 0.7)^2 # g_{1,2}
+    ),
+    list(
+        function(t) 1.5 * exp(-(t - 0.5)^2 / 0.5) - 0.1 * (t + 1) * cos(10 * t), # g_{2,1}
+        function(t) log(13 * (t + 0.2)) / (1 + t) # g_{2,2}
+    )
+)
+
+
+
+```
+
+### Simulation loop 
+produces sim_data[[as.character(n)]]$X and $Y arrays
+```{r}
+sim_data <- list()
+
+
+for (n in sample_sizes) {
+    # 3.1 draw random coefficients and group indicators
+    beta <- rnorm(n, mean = 1, sd = sqrt(0.3))
+    beta_p <- rnorm(n, mean = 1, sd = sqrt(0.3))
+    # G[i,j] ~ Uniform{1,2} for each j=1..6
+    G_mat <- matrix(sample(1:2, n * 6, replace = TRUE), nrow = n, ncol = 6)
+
+    # 3.2 pre-allocate arrays:
+    #    dims = [individual i, variable j, time t]
+    X_arr <- array(0, dim = c(n, 6, nt))
+    Y_arr <- array(0, dim = c(n, nt))
+
+    # 3.3 simulate input curves X_i^(j)(t)
+    for (i in seq_len(n)) {
+        for (j in 1:6) {
+            # select appropriate beta
+            b <- if (j <= 2) beta[i] else beta_p[i]
+            # choose which f_{j,k} applies
+            k <- G_mat[i, j]
+            # evaluate deterministic part
+            mean_curve <- f_list[[j]][[k]](t_seq)
+            # add white noise W_i^1(t) ~ N(0, 0.02^2)
+            noise1 <- rnorm(nt, mean = 0, sd = 0.02)
+            X_arr[i, j, ] <- b * mean_curve + noise1
+        }
+    }
+
+    # 3.4 simulate output curves Y_i(t)
+    #    depends only on G_mat[,1:2] and beta
+    for (i in seq_len(n)) {
+        j1 <- G_mat[i, 1]
+        j2 <- G_mat[i, 2]
+        mean_Y <- beta[i] * g_list[[j1]][[j2]](t_seq)
+        noise2 <- rnorm(nt, mean = 0, sd = 0.05)
+        Y_arr[i, ] <- mean_Y + noise2
+    }
+
+    # store
+    sim_data[[as.character(n)]] <- list(
+        X = X_arr,
+        Y = Y_arr,
+        t = t_seq
+    )
+}
+
+
+# Save simulated data to CSV files
+output_dir <- here::here("output", "frechet_rf_sims")
+if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+}
+
+for (n in names(sim_data)) {
+    # 1. Extract arrays
+    X_arr <- sim_data[[n]]$X # dim = (n_i, 6, nt)
+    Y_arr <- sim_data[[n]]$Y # dim = (n_i, nt)
+    t_vec <- sim_data[[n]]$t # length = nt
+
+    # 2. Melt X into long form
+    dfX <- melt(
+        X_arr,
+        varnames = c("individual", "variable", "time_idx"),
+        value.name = "X_value"
+    )
+    # add real time
+    dfX$time <- t_vec[dfX$time_idx]
+
+    # 3. Write out X_<n>.csv
+    write.csv(
+        dfX,
+        file      = paste0("X_", n, ".csv"),
+        row.names = FALSE
+    )
+
+    # ----- optional: do the same for Y -----
+    dfY <- melt(
+        Y_arr,
+        varnames = c("individual", "time_idx"),
+        value.name = "Y_value"
+    )
+    dfY$time <- t_vec[dfY$time_idx]
+
+    write.csv(
+        dfY,
+        file      = paste0("Y_", n, ".csv"),
+        row.names = FALSE
+    )
+}
+
+```
+
+
+
+## Plot simulated trajectories for each j
+Visualization of X^(j)(t) for n = 100
+```{r}
+# melt into long data.frame for ggplot2
+X100 <- sim_data[["100"]]$X
+df <- melt(
+    X100,
+    varnames = c("individual", "variable", "time_idx"),
+    value.name = "value"
+)
+df$time <- sim_data[["100"]]$t[df$time_idx]
+# label variables as expressions X^{(j)}
+df$variable <- factor(
+    df$variable,
+    levels = 1:6,
+    labels = paste0("X^{(", 1:6, ")}")
+)
+
+# plot
+X100_plot <- ggplot(df, aes(x = time, y = value, group = individual)) +
+    geom_line(alpha = 0.3) +
+    facet_wrap(
+        ~variable,
+        ncol = 3,
+        labeller = label_parsed
+    ) +
+    labs(x = "time", y = expression(X(t))) +
+    theme_minimal() +
+    theme(
+        strip.background = element_rect(fill = "grey80", colour = NA),
+        strip.text       = element_text(size = 12)
+    ) +
+    ggtitle("Simulated Functional Data X^{(j)}(t) for n = 100")
+
+# save plot
+ggsave(here("output", "frechet_rf_sims", "X_sim_plot.png"), X100_plot, width = 10, height = 6, dpi = 300)
+```
+
+
+
+## 2. Call Fréchet RF from Julia
+
+```{julia}
+#| label: "Julia ERFRF"
+#| echo: true
+using Pkg; Pkg.activate("."); Pkg.add(["CSV", "DataFrames", "ExtraFrech"])
+using CSV, DataFrames, ExtraFrech
+
+X_df = CSV.read("X_sim_flat.csv", DataFrame)
+Y_df = CSV.read("Y_sim.csv", DataFrame)
+
+X_mat = Matrix(X_df)
+Y_mat = Matrix(Y_df)
+
+model = ERFRF(X_mat, Y_mat; ntry=3, mtry=5, ntrees=100)
+
+Y_hat = predict(model, X_mat)
+
+CSV.write("Y_pred.csv", DataFrame(Y_hat))
+```
+
+## 3. Compute Performance Metrics in Python
+
+```{python}
+import pandas as pd
+import numpy as np
+from sklearn.metrics import mean_squared_error
+
+Y_true = pd.read_csv("Y_sim.csv").to_numpy()
+Y_pred = pd.read_csv("Y_pred.csv").to_numpy()
+
+mse_per_sample = np.mean((Y_true - Y_pred)**2, axis=1)
+overall_mse = np.mean(mse_per_sample)
+
+print(f"Mean Squared Error (per-curve): {overall_mse:.4f}")
+```
+
+
+Next, we generalize to the three temporal behavior functions scheme, where we have three different sets of functions for the input curves and two for the output curves. The simulation process is similar, but we need to adjust the function definitions and the group indicators accordingly. 
