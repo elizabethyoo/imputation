@@ -1,4 +1,3 @@
-
 ---
 title: "Fréchet Random Forest Simulation Study"
 format: html
@@ -9,12 +8,12 @@ execute:
   echo: true
 ---
 
-
 This notebook replicates some of the results in the capitaine2024frechet paper, corresponding to sections 5 and 6, where the authors simulate functional data and apply the Fréchet Random Forest (FRF) method to predict output curves based on input curves.
 
-We start with the two temporal behavior functions scheme 
+We start with the two temporal behavior functions scheme
 
 ## 
+
 ### SET UP: load libraries, define grid, set seed
 
 ```{r}
@@ -40,7 +39,8 @@ nt <- length(t_seq)
 sample_sizes <- c(100, 200, 400, 1000)
 ```
 
-### Define f_{j,k}(t) and g_{j,k}(t)
+### Define f\_{j,k}(t) and g\_{j,k}(t)
+
 ```{r}
 
 # f_list[[j]][[k]] gives f_{j,k}(t)
@@ -89,8 +89,10 @@ g_list <- list(
 
 ```
 
-### Simulation loop 
-produces sim_data[[as.character(n)]]$X and $Y arrays
+### Simulation loop
+
+produces sim_data\[\[as.character(n)\]\]\$X and \$Y arrays
+
 ```{r}
 sim_data <- list()
 
@@ -162,12 +164,12 @@ for (n in names(sim_data)) {
     # add real time
     dfX$time <- t_vec[dfX$time_idx]
 
-    # 3. Write out X_<n>.csv
-    write.csv(
-        dfX,
-        file      = paste0("X_", n, ".csv"),
-        row.names = FALSE
-    )
+    # # 3. Write out X_<n>.csv
+    # write.csv(
+    #     dfX,
+    #     file      = paste0("X_", n, ".csv"),
+    #     row.names = FALSE
+    # )
 
     # ----- optional: do the same for Y -----
     dfY <- melt(
@@ -177,19 +179,19 @@ for (n in names(sim_data)) {
     )
     dfY$time <- t_vec[dfY$time_idx]
 
-    write.csv(
-        dfY,
-        file      = paste0("Y_", n, ".csv"),
-        row.names = FALSE
-    )
+    # write.csv(
+    #     dfY,
+    #     file      = paste0("Y_", n, ".csv"),
+    #     row.names = FALSE
+    # )
 }
 
 ```
 
-
-
 ## Plot simulated trajectories for each j
-Visualization of X^(j)(t) for n = 100
+
+Visualization of X\^(j)(t) for n = 100
+
 ```{r}
 # melt into long data.frame for ggplot2
 X100 <- sim_data[["100"]]$X
@@ -223,30 +225,142 @@ X100_plot <- ggplot(df, aes(x = time, y = value, group = individual)) +
     ggtitle("Simulated Functional Data X^{(j)}(t) for n = 100")
 
 # save plot
-ggsave(here("output", "frechet_rf_sims", "X_sim_plot.png"), X100_plot, width = 10, height = 6, dpi = 300)
+ggsave(here("output", "frechet_rf_sims", "X_sim_2traj.png"), X100_plot, width = 10, height = 6, dpi = 300)
 ```
 
+```{r}
+Y100 <- read.csv(here("Y_100.csv"))
 
+Y100_plot <- ggplot(Y100, aes(x = time, y = value, group = individual, color = as.factor(individual))) +
+  geom_line(show.legend = FALSE) +
+  labs(
+    x = "time",
+    y = expression(Y(t)),
+    title = bquote("Output trajectories " ~ Y[i](t) ~ " for " ~ i == 1*":"*n ~ "=" ~ 100)
+  )
+
+# save plot 
+ggsave(here("output", "frechet_rf_sims", "Y_sim_2traj.png"), Y100_plot, width = 10, height = 6, dpi = 300)
+
+```
 
 ## 2. Call Fréchet RF from Julia
 
 ```{julia}
-#| label: "Julia ERFRF"
-#| echo: true
-using Pkg; Pkg.activate("."); Pkg.add(["CSV", "DataFrames", "ExtraFrech"])
-using CSV, DataFrames, ExtraFrech
+# 1) Activate *your* notebook/project, not ExtraFrech.jl itself
+using Pkg
+Pkg.activate("/Users/ecyoo/github/elizabethyoo/imputation")    # ← your main folder
+Pkg.instantiate()                                             # if you already have a Project.toml
+# or, if you don't yet:
+# Pkg.activate("."); Pkg.add(["CSV","DataFrames","Distances"])
 
-X_df = CSV.read("X_sim_flat.csv", DataFrame)
-Y_df = CSV.read("Y_sim.csv", DataFrame)
+# 2) Make sure CSV, DataFrames, Distances (etc) are installed in that env
+Pkg.add(["CSV","DataFrames","Distances", "StatsBase", "ProgressMeter", "Random"])
 
-X_mat = Matrix(X_df)
-Y_mat = Matrix(Y_df)
+# 3) Point Julia at the ExtraFrech source
+push!(LOAD_PATH, "/Users/ecyoo/github/elizabethyoo/imputation/ExtraFrech.jl/src")
+include("/Users/ecyoo/github/elizabethyoo/imputation/ExtraFrech.jl/src/ExtraFrech.jl")
 
-model = ERFRF(X_mat, Y_mat; ntry=3, mtry=5, ntrees=100)
+# 4) Now load everything
+using CSV, DataFrames, Distances, .ExtraFrech, StatsBase, Random
 
-Y_hat = predict(model, X_mat)
+```
 
-CSV.write("Y_pred.csv", DataFrame(Y_hat))
+```{julia}
+# Read CSVs
+DATA_PATH = "/Users/ecyoo/github/elizabethyoo/imputation"
+X_df = CSV.read(joinpath(DATA_PATH, "X_100.csv"), DataFrame)
+Y_df = CSV.read(joinpath(DATA_PATH, "Y_100.csv"), DataFrame)
+
+
+# Determine dimensions
+T = length(unique(X_df.time))
+n = length(unique(X_df.individual))
+p = length(unique(X_df.variable))
+
+# Reshape X: (T, n, p)
+X_df_pivot = unstack(X_df, [:individual, :time], :variable, :value)
+X_df_pivot = sort(X_df_pivot, [:time, :individual])
+X = zeros(T, n, p)
+for j in 1:p
+    X[:, :, j] = reshape(X_df_pivot[!, string(j)], T, n)
+end
+
+Y = combine(groupby(Y_df, :individual), :value => mean => :Y_mean).Y_mean
+
+```
+
+```{julia}
+# helper function for splitting the data into train/test set 
+using Random
+
+"""
+    train_test_split(X::Array{Float64,3}, Y::Vector{Float64}; split_ratio::Float64=0.8, seed::Int=1234)
+
+Splits the data (X, Y) into training and testing sets based on the given `split_ratio`.
+
+# Arguments
+- `X`: A 3D array of shape (T, n, p)
+- `Y`: A 1D vector of length n
+- `split_ratio`: Proportion of data to include in the training set (default = 0.8)
+- `seed`: Random seed for reproducibility (default = 1234)
+
+# Returns
+- `(X_train, X_test, Y_train, Y_test)`
+"""
+function train_test_split(X::Array{Float64,3}, Y::Vector{Float64}; split_ratio::Float64=0.8, seed::Int=1234)
+    Random.seed!(seed)
+    n = size(X, 2)
+    n_train = round(Int, split_ratio * n)
+    train_idx = sample(1:n, n_train; replace=false)
+    test_idx = setdiff(1:n, train_idx)
+
+    X_train = X[:, train_idx, :]
+    Y_train = Y[train_idx]
+
+    X_test = X[:, test_idx, :]
+    Y_test = Y[test_idx]
+
+    return X_train, X_test, Y_train, Y_test
+end
+
+X_tr, X_te, Y_tr, Y_te = train_test_split(X, Y; split_ratio = 0.8, seed = 1234)
+```
+
+```{Y = combine(groupby(Y_df, :individual), :value => mean => :Y_mean).Y_mean}
+```
+
+``` julia
+# Reduce Y to 1D via mean across time
+```
+
+```{julia}
+# 3) Point Julia at the ExtraFrech source
+push!(LOAD_PATH, "/Users/ecyoo/github/elizabethyoo/imputation/ExtraFrech.jl/src")
+include("/Users/ecyoo/github/elizabethyoo/imputation/ExtraFrech.jl/src/ExtraFrech.jl")
+using .ExtraFrech: ExtraFrechetRF, pred_rf
+
+using Distances
+
+mtry = 5
+ntree = 250
+ntry = 3       
+minElem = 5  
+dist = Euclidean()
+
+# Fit model
+EFRF_model = ExtraFrechetRF(X_tr, Y_tr, mtry, ntree, ntry, true, minElem, dist)
+```
+
+```{julia}
+
+Y_pred = pred_rf(EFRF_model, X_te, X_tr)
+test_mse = mean((Y_te .- Y_pred).^2)
+```
+
+```{ia mean across time}
+Y = combine(groupby(Y_df, :individual), :value => mean => :Y_mean).Y_mean
+
 ```
 
 ## 3. Compute Performance Metrics in Python
@@ -265,5 +379,4 @@ overall_mse = np.mean(mse_per_sample)
 print(f"Mean Squared Error (per-curve): {overall_mse:.4f}")
 ```
 
-
-Next, we generalize to the three temporal behavior functions scheme, where we have three different sets of functions for the input curves and two for the output curves. The simulation process is similar, but we need to adjust the function definitions and the group indicators accordingly. 
+Next, we generalize to the three temporal behavior functions scheme, where we have three different sets of functions for the input curves and two for the output curves. The simulation process is similar, but we need to adjust the function definitions and the group indicators accordingly.
